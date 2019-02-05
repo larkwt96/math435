@@ -49,6 +49,8 @@ class OdeSolver:
             plt.plot(self.tn, np.array(self.yn)[:, i], '-o')
             plt.xlabel('Time')
             plt.ylabel(labels[i])
+            plt.ylim(bottom=0)
+        plt.tight_layout()
         plt.show()
 
     def _step(self):
