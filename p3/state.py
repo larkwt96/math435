@@ -95,15 +95,23 @@ class State:
         centers = self.block_width*district[2]-.5
         plt.scatter(centers[:, 0], centers[:, 1], c='k', s=5)
 
+    @classmethod
+    def compact_score(cls, X, center=None):
+        # X is n by dim matrix
+        if center is None:
+            center = np.mean(X, axis=0)
+        sq_dist = (X - center)**2
+        sq_dist_sum = np.sum(sq_dist, axis=1)
+        return np.mean(sq_dist_sum, axis=0)
+
     def calc_compactness(self, district):
         classes, n, centers = district
         block_locs = self.get_block_centers()
         scores = []
         for classi in range(n):
             classi_locs = np.where(classes == classi)
-            sq_dist = (block_locs[classi_locs] - centers[classi, :])**2
-            sq_dist_sum = np.sum(sq_dist, axis=1)
-            score = np.mean(sq_dist_sum, axis=0)
+            score = self.compact_score(block_locs[classi_locs],
+                                       centers[classi, :])
             scores.append(score)
         return np.mean(scores), scores
 
