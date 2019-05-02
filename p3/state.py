@@ -8,6 +8,7 @@ from random import shuffle
 # local imports
 from block import Block
 from person import Person
+from kmeans import ManKMeans
 
 
 """
@@ -33,7 +34,7 @@ class State:
     change)
     """
 
-    def __init__(self, num_people=None, block_width=10):
+    def __init__(self, num_people=None, block_width=15):
         self.people_scale = 1000
         if num_people is None:
             num_people = int(5.696 * 10**6 / self.people_scale)
@@ -76,15 +77,6 @@ class State:
     def plot_district(self, district):
         classes, n, *rest = district
         plt.figure()
-        # create discrete colormap
-        color_names = list(colors.BASE_COLORS.keys())
-        color_names.remove('k')
-        color_names.remove('w')
-        shuffle(color_names)
-        cmap = colors.ListedColormap(color_names)
-        norm = colors.BoundaryNorm(list(range(n+1)), cmap.N)
-
-        #plt.imshow(classes, cmap=cmap, norm=norm, origin='lower')
         plt.imshow(classes/n, cmap='viridis', origin='lower')
 
         # draw gridlines
@@ -94,13 +86,26 @@ class State:
         plt.xticks(tick_locs, range(self.block_width), ha='left')
         plt.yticks(tick_locs, range(self.block_width), va='bottom')
 
-    def plot_district_even(self, n=None):
+    def plot_district_even(self, n=None, district=None):
         if n is None:
             n = self.get_seats()
-        district = self.district_even(n)
+        if district is None:
+            district = self.district_even(n)
         self.plot_district(district)
         centers = self.block_width*district[2]-.5
         plt.scatter(centers[:, 0], centers[:, 1], c='k', s=5)
+
+    def calc_compactness(self, district):
+        classes, n, centers = district
+        block_locs = self.get_block_centers()
+        scores = []
+        for classi in range(n):
+            classi_locs = np.where(classes == classi)
+            sq_dist = (block_locs[classi_locs] - centers[classi, :])**2
+            sq_dist_sum = np.sum(sq_dist, axis=1)
+            score = np.mean(sq_dist_sum, axis=0)
+            scores.append(score)
+        return np.mean(scores), scores
 
     def get_block_center(self, x, y):
         """ returns position of the xth block and yth block, origin lower """
@@ -149,7 +154,7 @@ class State:
                 class_count[pref] += 1
         return pops, class_count
 
-    def get_kmeans_classes(self, n=None):
+    def get_kmeans_classes(self, n=None, manual=False):
         """
         returns classes, num classes (n) and k means centers (centers), row
         by col of class
@@ -157,7 +162,10 @@ class State:
         if n is None:
             n = self.get_seats()
         X = np.array([[x, y] for x, y in self.people.keys()])
-        kmeans = KMeans(n_clusters=n, random_state=0).fit(X)
+        if manual:
+            kmeans = ManKMeans(n_clusters=n, random_state=0).fit(X)
+        else:
+            kmeans = KMeans(n_clusters=n, random_state=0).fit(X)
         centers = kmeans.cluster_centers_
         block_centers = self.get_block_centers()
         old_shape = block_centers.shape
@@ -165,22 +173,185 @@ class State:
         classes = classes.reshape(*old_shape[:-1])
         return classes, n, centers
 
-    def adjust_population_classes(self, classes, n):
-        reached_goal = False
-        while not reached_goal:
+    def get_dist_center(self, blocks):
+        block_poses = [self.get_block_center(x, y) for y, x in blocks]
+        return np.mean(block_poses, axis=0)
+
+    def get_dist_centers(self, classes, n):
+        """ returns array of centers for each class (relative to center of
+        block). shape: class, dim
+        """
+        blocks = [self.get_blocks(classes, classi) for classi in range(n)]
+        return np.array([self.get_dist_center(block_group)
+                         for block_group in blocks])
+
+    def get_blocks(self, classes, classi):
+        """ returns blocks in y, x coords """
+        top_blocks = np.where(classes == classi)
+        return list(zip(*top_blocks))
+
+    def dist(self, u, v):
+        # squared distance since actual dist isnt needed
+        return np.sum((u-v)**2)
+
+    def get_area(self, classes, blocki):
+        ''' blocki is y, x and returns iterable '''
+        y, x = blocki
+        n = classes.shape[0]
+        minx = max(0, x-1)
+        maxx = min(x+2, n)
+        miny = max(0, y-1)
+        maxy = min(y+2, n)
+        xs = list(range(minx, maxx))
+        ys = list(range(miny, maxy))
+        return product(ys, xs)
+
+    def get_area_neighbors(self, classes, blocki):
+        y, x = blocki
+        n = classes.shape[0]
+        minx = max(0, x-1)
+        maxx = min(x+2, n)
+        miny = max(0, y-1)
+        maxy = min(y+2, n)
+        xs = list(range(minx, maxx))
+        ys = list(range(miny, maxy))
+
+        return ([y for y, x in product(ys, xs)], [x for y, x in product(ys, xs)])
+
+    def get_neighbors(self, classes, blocki):
+        ''' blocki is y, x '''
+        y, x = blocki
+        n = classes.shape[0]
+        up = (y+1, x)
+        down = (y-1, x)
+        left = (y, x-1)
+        right = (y, x+1)
+        res = []
+        if y+1 < n:
+            res.append(up)
+        if y-1 >= 0:
+            res.append(down)
+        if x+1 < n:
+            res.append(right)
+        if x-1 >= 0:
+            res.append(left)
+        return ([y for y, _ in res], [x for _, x in res]), (up, down, left, right)
+
+    def has_same_neighbor(self, classes, blocki):
+        """ checks if block has neighbors of same color """
+        neighbs, (up, down, left, right) = self.get_neighbors(classes, blocki)
+        classi = classes[blocki]
+        return np.sum(classes[neighbs] == classes[blocki]) > 0
+
+    def snake(self, classes, blocki):
+        neighbi = self.get_area_neighbors(classes, blocki)
+        return np.sum(classes[neighbi] == classes[blocki]) <= 2
+
+    def can_switch(self, classes, blocki, target, n):
+        """ blocki """
+        if classes[blocki] == target:
+            return False
+        source = classes[blocki]
+
+        classes[blocki] = target
+        for neighbi in self.get_area(classes, blocki):
+            if not self.has_same_neighbor(classes, neighbi):
+                classes[blocki] = source
+                return False
+        classes[blocki] = source
+
+        if self.snake(classes, blocki):
+            return False
+
+        _, (up, down, left, right) = self.get_neighbors(classes, blocki)
+        if not self.check_split(classes, blocki, target, (up, down, left, right)):
+            return False
+        if not self.check_split(classes, blocki, target, (left, right, up, down)):
+            return False
+
+        return True
+
+    def check_split(self, classes, blocki, target, dirs):
+        (opp1, opp2, side1, side2) = dirs
+        try:
+            if classes[opp1] != classes[opp2]:
+                return True
+            if classes[opp1] != classes[blocki]:
+                return True
+        except IndexError:
+            return True
+        try:
+            if classes[side1] == classes[blocki]:
+                return True
+        except IndexError:
+            pass
+
+        try:
+            if classes[side2] == classes[blocki]:
+                return True
+        except IndexError:
+            pass
+        return False
+
+    def adjust_population_classes(self, classes, n, iters=100, verbose=False, plotting=False):
+        last_target = -1
+        last_source = -1
+        for i in range(iters):
             class_pops, class_count = self.calc_class_pop(classes, n)
-            reached_goal = True
-        print(class_pops, self.num_people/n)
-        print(class_count)
-        return classes
+            centers = self.get_dist_centers(classes, n)
+            for top_class in np.flip(np.argsort(class_pops)):
+                if np.random.rand() < .1:  # debug
+                    continue
+                if top_class == last_source:
+                    continue
+                if class_pops[top_class] < np.mean(class_pops):
+                    break
+                top_blocks = self.get_blocks(classes, top_class)
+                dists = np.zeros((len(top_blocks), n))
+                for blocki, block in enumerate(top_blocks):
+                    for centeri, center in enumerate(centers):
+                        block_center = np.array(self.get_block_center(*block))
+                        dists[blocki, centeri] = self.dist(
+                            block_center, center)
+                closest = np.argsort(dists, axis=None)
+                closest = np.unravel_index(closest, dists.shape)
+                flipped = False
+                for blocki, target in zip(*closest):
+                    blocki = tuple(np.flip(top_blocks[blocki]))
+                    if class_pops[target] > np.mean(class_pops):
+                        continue
+                    if target == last_source:
+                        continue
+                    if self.can_switch(classes, blocki, target, n):
+                        flipped = True
+                        if verbose:
+                            print(class_pops / (np.mean(class_pops)))
+                            print(np.flip(blocki),
+                                  classes[blocki], 'to', target)
+                        last_source = classes[blocki]
+                        classes[blocki] = target
+                        last_target = target
+                        # print(class_pops)
+                        break
+                if flipped:
+                    break
+            if plotting and i % max(1, iters//10) == 0:
+                print('plotting')
+                self.plot_district_even(district=(classes, n, centers))
+                plt.show()
+
+        centers = self.get_dist_centers(classes, n)
+        return classes, centers
 
     def district_even(self, n=None):
         """
         Returns tuple (row by col classes matrix of class, n, *values special
         to algorithm). In this case, special values is the kmeans centers.
         """
-        classes, n, centers = self.get_kmeans_classes(n)
-        classes = self.adjust_population_classes(classes, n)
+        manual = False
+        classes, n, centers = self.get_kmeans_classes(n, manual=manual)
+        if not manual:
+            classes, centers = self.adjust_population_classes(classes, n)
         return (classes, n, centers)
 
     def district_pack(self, n):
@@ -210,8 +381,8 @@ class State:
         plt.title('Block Preference Proportion')
         plt.pcolor(z, cmap='RdBu', vmin=0, vmax=1)
         tick_locs = range(self.block_width)
-        #tick_labels = range(self.block_width)
-        #plt.xticks(tick_locs, tick_labels, ha='left')
+        # tick_labels = range(self.block_width)
+        # plt.xticks(tick_locs, tick_labels, ha='left')
         plt.xticks(tick_locs, ha='left')
         plt.yticks(tick_locs, va='bottom')
         cbar = plt.colorbar()
